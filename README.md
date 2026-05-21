@@ -3,7 +3,7 @@
 This project includes [code](https://github.com/modelcontextprotocol/servers-archived/tree/main/src/slack) originally developed by Anthropic and released under the MIT License. Substantial modifications and new functionality have been added by For Good AI Inc. (dba Zencoder Inc.), and are licensed under the Apache License, Version 2.0.
 
 ## Overview
-A Model Context Protocol (MCP) server for interacting with Slack workspaces. This server provides tools to list channels, post messages, reply to threads, add reactions, get channel history, and manage users.
+A Model Context Protocol (MCP) server for interacting with Slack workspaces. This server provides tools to list channels, post messages, reply to threads, add reactions, get channel history, manage users, and inspect Slack metadata with bot and user tokens.
 
 ## Available Tools
 
@@ -65,6 +65,81 @@ A Model Context Protocol (MCP) server for interacting with Slack workspaces. Thi
      - `user_id` (string): The user's ID
    - Returns: Detailed user profile information
 
+### Hybrid Inspection Tools
+
+These tools use optional non-bot tokens when configured:
+
+9. **slack_get_workspace_access_report**
+   - Show which Slack token roles are configured and what each can inspect
+   - Does not return token values
+
+10. **slack_list_conversations**
+   - List conversations using the best configured read token
+   - Uses `SLACK_USER_TOKEN` when configured, otherwise `SLACK_BOT_TOKEN`
+   - Optional inputs: `limit`, `cursor`, `types`, `exclude_archived`, `token_role`
+
+11. **slack_get_conversation_info**
+   - Get conversation metadata
+   - Uses `SLACK_USER_TOKEN` when configured, otherwise `SLACK_BOT_TOKEN`
+   - Optional inputs: `include_locale`, `include_num_members`, `token_role`
+
+12. **slack_get_conversation_members**
+   - List conversation members
+   - Uses `SLACK_USER_TOKEN` when configured, otherwise `SLACK_BOT_TOKEN`
+   - Optional inputs: `limit`, `cursor`, `token_role`
+   - Intended for membership inspection, not message content access
+
+The existing **slack_get_channel_history** tool also supports `cursor`, `oldest`, `latest`, `inclusive`, and `token_role`. By default it uses `SLACK_USER_TOKEN` when configured, otherwise `SLACK_BOT_TOKEN`.
+
+### Skill-Compatible Goal Tools
+
+These are the preferred tools for agents using the bundled Slack skills. They choose bot or user access internally and include compact routing metadata in the response.
+
+13. **slack_read_user_profile**
+   - Read the current identity profile by default, or a specific `user_id`
+
+14. **slack_search_channels**
+   - Resolve channel names and IDs through the best available metadata token
+
+15. **slack_read_channel**
+   - Read channel messages with `channel_id`, `limit`, `oldest`, `latest`, and `cursor`
+   - Defaults to `SLACK_USER_TOKEN`, then falls back safely to `SLACK_BOT_TOKEN`
+
+16. **slack_read_thread**
+   - Read thread replies with `channel_id`, `thread_ts`, `limit`, and `cursor`
+   - Defaults to `SLACK_USER_TOKEN`, then falls back safely to `SLACK_BOT_TOKEN`
+
+17. **slack_search_users**
+   - Search users by ID, name, display name, real name, or email where available
+
+18. **slack_search_public_and_private**
+   - Search Slack messages with `search.messages` where token scopes allow
+   - Accepts `channel_types` for skill compatibility, but actual coverage follows Slack search and token access
+
+19. **slack_search_conversations**
+   - Search conversations by name by filtering one bounded `conversations.list` page
+   - User token covers public/private channels; bot token can also cover IM/MPIM where bot scopes allow
+
+20. **slack_get_channel_history_by_name**
+   - Resolve a channel by name, then read message history with intent-aware routing
+
+21. **slack_send_message**
+   - Send messages with `target`, `text`, `thread_ts`, `message_intent`, and `allow_identity_fallback`
+   - `outbound_message` prefers user identity
+   - `notification`, `reminder`, and `automation_update` prefer bot identity
+
+22. **slack_edit_message** and **slack_delete_message**
+   - Edit or delete messages with identity-aware routing
+   - Slack only permits editing/deleting messages owned or deletable by the selected identity
+
+23. **slack_schedule_message**
+   - Schedule messages with the same identity-aware routing as `slack_send_message`
+
+24. **slack_send_message_draft** and **slack_create_canvas**
+   - Return structured `unsupported_action` responses in this server because Slack Web API draft/canvas creation is not implemented here
+
+Skill-facing responses include a `routing` object with `selected_token_role`, `fallback_attempts`, `routing_reason`, and optional `access_limitation`. Token values are never returned.
+
 ## Slack Bot Setup
 
 To use this MCP server, you need to create a Slack app and configure it with the necessary permissions:
@@ -84,6 +159,11 @@ Navigate to "OAuth & Permissions" and add these scopes:
 - `users:read` - View users and their basic information
 - `users.profile:read` - View detailed profiles about users
 
+Optional hybrid inspection scopes:
+- User token (`SLACK_USER_TOKEN`, `xoxp-`): `channels:history`, `channels:read`; add `groups:read`, `groups:history`, `im:read`, `im:history`, `mpim:read`, and `mpim:history` only for conversation types the user token is allowed to access.
+
+The current tested user token scope set includes `chat:write`, `channels:history`, `channels:read`, `groups:read`, `groups:history`, `im:history`, `mpim:history`, `search:read`, `search:read.im`, `search:read.mpim`, `search:read.public`, `search:read.users`, `users.profile:read`, and `identify`. The current bot scope set includes channel/group/IM/MPIM read and history scopes, `chat:write`, `chat:write.public`, reactions, pins, files, search read scopes, and `users:read`.
+
 ### 3. Install App to Workspace
 - Click "Install to Workspace" and authorize the app
 - Save the "Bot User OAuth Token" that starts with `xoxb-`
@@ -94,10 +174,16 @@ Get your Team ID (starts with a `T`) by following [this guidance](https://slack.
 ### 5. Add Bot to Channels (Optional)
 For the bot to access private channels or to post messages, you may need to invite it to specific channels using `/invite @your-bot-name`
 
+### Slack API Access Limits
+
+- Slack does not allow arbitrary private-channel or DM history access through these tools.
+- `SLACK_BOT_TOKEN` is member-limited: it can read private channels only after the bot is invited, and public/private visibility still follows Slack app permissions.
+- `SLACK_USER_TOKEN` broadens public-channel history inspection for channels the user token can read; it does not grant arbitrary private-channel or DM access.
+
 ## Features
 
 - **Multiple Transport Support**: Supports both stdio and Streamable HTTP transports
-- **Modern MCP SDK**: Updated to use the latest MCP SDK (v1.13.2) with modern APIs
+- **Modern MCP SDK**: Uses MCP SDK v1.15.1 with modern APIs
 - **Comprehensive Slack Integration**: Full set of Slack operations including:
   - List channels (with predefined channel support)
   - Post messages
@@ -107,6 +193,8 @@ For the bot to access private channels or to post messages, you may need to invi
   - Get thread replies
   - List users
   - Get user profiles
+  - Inspect public-channel history with an optional user token
+  - Skill-compatible read, search, and send tools with intent-aware token routing
 
 ## Installation
 
@@ -139,6 +227,7 @@ Set the following environment variables:
 
 ```bash
 export SLACK_BOT_TOKEN="xoxb-your-bot-token"
+export SLACK_USER_TOKEN="xoxp-your-user-token"  # Optional: public-channel inspection
 export SLACK_TEAM_ID="your-team-id"
 export SLACK_CHANNEL_IDS="channel1,channel2,channel3"  # Optional: predefined channels
 export AUTH_TOKEN="your-auth-token"  # Optional: Bearer token for HTTP authorization (Streamable HTTP transport only)
@@ -209,24 +298,28 @@ AUTH_TOKEN=mytoken node dist/index.js --transport http
 # Run with stdio transport (default)
 docker run --rm \
   -e SLACK_BOT_TOKEN="xoxb-your-bot-token" \
+  -e SLACK_USER_TOKEN="xoxp-your-user-token" \
   -e SLACK_TEAM_ID="your-team-id" \
   zencoderai/slack-mcp:latest
 
 # Run with HTTP transport on port 3000
 docker run --rm -p 3000:3000 \
   -e SLACK_BOT_TOKEN="xoxb-your-bot-token" \
+  -e SLACK_USER_TOKEN="xoxp-your-user-token" \
   -e SLACK_TEAM_ID="your-team-id" \
   zencoderai/slack-mcp:latest --transport http
 
 # Run with HTTP transport on custom port
 docker run --rm -p 8080:8080 \
   -e SLACK_BOT_TOKEN="xoxb-your-bot-token" \
+  -e SLACK_USER_TOKEN="xoxp-your-user-token" \
   -e SLACK_TEAM_ID="your-team-id" \
   zencoderai/slack-mcp:latest --transport http --port 8080
 
 # Run with custom auth token
 docker run --rm -p 3000:3000 \
   -e SLACK_BOT_TOKEN="xoxb-your-bot-token" \
+  -e SLACK_USER_TOKEN="xoxp-your-user-token" \
   -e SLACK_TEAM_ID="your-team-id" \
   -e AUTH_TOKEN="mytoken" \
   zencoderai/slack-mcp:latest --transport http
@@ -246,6 +339,7 @@ services:
     # build: .
     environment:
       - SLACK_BOT_TOKEN=xoxb-your-bot-token
+      - SLACK_USER_TOKEN=xoxp-your-user-token  # Optional
       - SLACK_TEAM_ID=your-team-id
       - SLACK_CHANNEL_IDS=channel1,channel2,channel3  # Optional
       - AUTH_TOKEN=your-auth-token  # Optional for HTTP transport
@@ -325,7 +419,7 @@ When using Streamable HTTP transport, the server exposes the following endpoints
 
 ## Changes from Previous Version
 
-- **Updated MCP SDK**: Upgraded from v1.0.1 to v1.13.2
+- **Updated MCP SDK**: Upgraded from v1.0.1 to v1.15.1
 - **Modern API**: Migrated from low-level Server class to high-level McpServer class
 - **Zod Validation**: Added proper schema validation using Zod
 - **Transport Flexibility**: Added support for Streamable HTTP transport
