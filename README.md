@@ -3,7 +3,7 @@
 This project includes [code](https://github.com/modelcontextprotocol/servers-archived/tree/main/src/slack) originally developed by Anthropic and released under the MIT License. Substantial modifications and new functionality have been added by For Good AI Inc. (dba Zencoder Inc.), and are licensed under the Apache License, Version 2.0.
 
 ## Overview
-A Model Context Protocol (MCP) server for interacting with Slack workspaces. This server provides tools to list channels, post messages, reply to threads, add reactions, get channel history, manage users, and inspect Slack metadata with bot and user tokens.
+A Model Context Protocol (MCP) server for interacting with Slack workspaces. This server provides tools to list channels, post messages, reply to threads, add reactions, get channel history, inspect Slack file attachments, manage users, and inspect Slack metadata with bot and user tokens.
 
 ## Available Tools
 
@@ -43,7 +43,10 @@ A Model Context Protocol (MCP) server for interacting with Slack workspaces. Thi
      - `channel_id` (string): The channel ID
    - Optional inputs:
      - `limit` (number, default: 10): Number of messages to retrieve
+     - `include_files` (boolean, default: false): Fetch Slack file metadata for file messages
+     - `include_file_content` (boolean, default: false): Download supported image/text file content
    - Returns: List of messages with their content and metadata
+   - Messages with files, attachments, or image blocks include `attachment_summary` by default so agents know when to call `slack_read_file`
 
 6. **slack_get_thread_replies**
    - Get all replies in a message thread
@@ -51,6 +54,7 @@ A Model Context Protocol (MCP) server for interacting with Slack workspaces. Thi
      - `channel_id` (string): The channel containing the thread
      - `thread_ts` (string): Timestamp of the parent message
    - Returns: List of replies with their content and metadata
+   - Messages with files, attachments, or image blocks include `attachment_summary` by default
 
 7. **slack_get_users**
    - Get list of workspace users with basic profile information
@@ -89,53 +93,74 @@ These tools use optional non-bot tokens when configured:
    - Optional inputs: `limit`, `cursor`, `token_role`
    - Intended for membership inspection, not message content access
 
-The existing **slack_get_channel_history** tool also supports `cursor`, `oldest`, `latest`, `inclusive`, and `token_role`. By default it uses `SLACK_USER_TOKEN` when configured, otherwise `SLACK_BOT_TOKEN`.
+The existing **slack_get_channel_history** tool also supports `cursor`, `oldest`, `latest`, `inclusive`, `token_role`, `include_files`, `include_file_content`, `max_file_bytes`, and `max_files`. By default it uses `SLACK_USER_TOKEN` when configured, otherwise `SLACK_BOT_TOKEN`.
+
+### Attachment and File Tools
+
+Read tools always add a compact `attachment_summary` to messages containing Slack `files`, `attachments`, or image blocks. File bytes are never downloaded by default.
+
+13. **slack_get_file_info**
+   - Get sanitized Slack file metadata with `file_id` and optional `token_role`
+   - Uses Slack `files.info`
+   - Does not return token values or private Slack download URLs
+
+14. **slack_read_file**
+   - Read supported Slack-hosted file content with `file_id`, optional `token_role`, and optional `max_bytes`
+   - Defaults to user token, then bot token fallback
+   - Default and maximum download cap: 10 MB
+   - Images return MCP `image` content
+   - Text-like files return embedded MCP text resources
+   - Unsupported files such as PDFs, DOCX, spreadsheets, video, and audio return metadata only with `access_limitation`
 
 ### Skill-Compatible Goal Tools
 
 These are the preferred tools for agents using the bundled Slack skills. They choose bot or user access internally and include compact routing metadata in the response.
 
-13. **slack_read_user_profile**
+15. **slack_read_user_profile**
    - Read the current identity profile by default, or a specific `user_id`
 
-14. **slack_search_channels**
+16. **slack_search_channels**
    - Resolve channel names and IDs through the best available metadata token
 
-15. **slack_read_channel**
+17. **slack_read_channel**
    - Read channel messages with `channel_id`, `limit`, `oldest`, `latest`, and `cursor`
    - Defaults to `SLACK_USER_TOKEN`, then falls back safely to `SLACK_BOT_TOKEN`
+   - Supports `include_files`, `include_file_content`, `max_file_bytes`, and `max_files`
+   - Messages with files, attachments, or image blocks include `attachment_summary` by default
 
-16. **slack_read_thread**
+18. **slack_read_thread**
    - Read thread replies with `channel_id`, `thread_ts`, `limit`, and `cursor`
    - Defaults to `SLACK_USER_TOKEN`, then falls back safely to `SLACK_BOT_TOKEN`
+   - Supports the same attachment/file options as `slack_read_channel`
 
-17. **slack_search_users**
+19. **slack_search_users**
    - Search users by ID, name, display name, real name, or email where available
 
-18. **slack_search_public_and_private**
+20. **slack_search_public_and_private**
    - Search Slack messages with `search.messages` where token scopes allow
    - Accepts `channel_types` for skill compatibility, but actual coverage follows Slack search and token access
 
-19. **slack_search_conversations**
+21. **slack_search_conversations**
    - Search conversations by name by filtering one bounded `conversations.list` page
    - User token covers public/private channels; bot token can also cover IM/MPIM where bot scopes allow
 
-20. **slack_get_channel_history_by_name**
+22. **slack_get_channel_history_by_name**
    - Resolve a channel by name, then read message history with intent-aware routing
+   - Supports the same attachment/file options as `slack_read_channel`
 
-21. **slack_send_message**
+23. **slack_send_message**
    - Send messages with `target`, `text`, `thread_ts`, `message_intent`, and `allow_identity_fallback`
    - `outbound_message` prefers user identity
    - `notification`, `reminder`, and `automation_update` prefer bot identity
 
-22. **slack_edit_message** and **slack_delete_message**
+24. **slack_edit_message** and **slack_delete_message**
    - Edit or delete messages with identity-aware routing
    - Slack only permits editing/deleting messages owned or deletable by the selected identity
 
-23. **slack_schedule_message**
+25. **slack_schedule_message**
    - Schedule messages with the same identity-aware routing as `slack_send_message`
 
-24. **slack_send_message_draft** and **slack_create_canvas**
+26. **slack_send_message_draft** and **slack_create_canvas**
    - Return structured `unsupported_action` responses in this server because Slack Web API draft/canvas creation is not implemented here
 
 Skill-facing responses include a `routing` object with `selected_token_role`, `fallback_attempts`, `routing_reason`, and optional `access_limitation`. Token values are never returned.
@@ -158,9 +183,10 @@ Navigate to "OAuth & Permissions" and add these scopes:
 - `reactions:write` - Add emoji reactions to messages
 - `users:read` - View users and their basic information
 - `users.profile:read` - View detailed profiles about users
+- `files:read` - View and download files shared in conversations the app can access
 
 Optional hybrid inspection scopes:
-- User token (`SLACK_USER_TOKEN`, `xoxp-`): `channels:history`, `channels:read`; add `groups:read`, `groups:history`, `im:read`, `im:history`, `mpim:read`, and `mpim:history` only for conversation types the user token is allowed to access.
+- User token (`SLACK_USER_TOKEN`, `xoxp-`): `channels:history`, `channels:read`; add `groups:read`, `groups:history`, `im:read`, `im:history`, `mpim:read`, `mpim:history`, and `files:read` only for conversation and file types the user token is allowed to access.
 
 The current tested user token scope set includes `chat:write`, `channels:history`, `channels:read`, `groups:read`, `groups:history`, `im:history`, `mpim:history`, `search:read`, `search:read.im`, `search:read.mpim`, `search:read.public`, `search:read.users`, `users.profile:read`, and `identify`. The current bot scope set includes channel/group/IM/MPIM read and history scopes, `chat:write`, `chat:write.public`, reactions, pins, files, search read scopes, and `users:read`.
 
@@ -194,7 +220,15 @@ For the bot to access private channels or to post messages, you may need to invi
   - List users
   - Get user profiles
   - Inspect public-channel history with an optional user token
+  - Identify messages with Slack files, attachments, or image blocks
+  - Read Slack-hosted images and text-like files through MCP-native content
   - Skill-compatible read, search, and send tools with intent-aware token routing
+
+## Bundled Skills
+
+This repository includes installable Codex skills under `skills/`:
+
+- `skills/slack-mrkdwn` - compose Slack write-tool `text` values in native Slack `mrkdwn`, including links, mentions, emphasis, code, and escaping rules.
 
 ## Installation
 

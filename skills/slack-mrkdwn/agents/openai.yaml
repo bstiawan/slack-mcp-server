@@ -1,0 +1,4 @@
+interface:
+  display_name: "Slack mrkdwn"
+  short_description: "Compose Slack messages in native mrkdwn."
+  default_prompt: "Use $slack-mrkdwn to convert or compose Slack message text in native mrkdwn before sending through Slack MCP tools."

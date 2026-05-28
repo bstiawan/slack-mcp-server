@@ -6,6 +6,11 @@ import { describe, expect, test, jest, beforeEach, afterEach } from '@jest/globa
 const mockRegisterTool = jest.fn();
 const mockConnect = jest.fn();
 
+const arrayBufferFromString = (value: string): ArrayBuffer => {
+  const buffer = Buffer.from(value, 'utf8');
+  return buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength);
+};
+
 // Mock the MCP SDK modules
 (jest as any).unstable_mockModule('@modelcontextprotocol/sdk/server/mcp.js', () => ({
   McpServer: jest.fn().mockImplementation(() => ({
@@ -667,6 +672,54 @@ describe('SlackClient', () => {
       }),
     );
   });
+
+  test('getFileInfo calls Slack files.info with selected token', async () => {
+    const hybridClient = new SlackClient('xoxb-test-token', 'xoxp-user-token');
+
+    mockFetch.mockResolvedValueOnce({
+      json: () => Promise.resolve({ ok: true, file: { id: 'F123456', name: 'screenshot.png' } }),
+    });
+
+    const result = await hybridClient.getFileInfo('F123456', 'user');
+
+    expect(result).toEqual({ ok: true, file: { id: 'F123456', name: 'screenshot.png' } });
+    expect(mockFetch).toHaveBeenCalledWith(
+      expect.stringContaining('https://slack.com/api/files.info'),
+      expect.objectContaining({
+        headers: expect.objectContaining({ Authorization: 'Bearer xoxp-user-token' }),
+      }),
+    );
+    expect(mockFetch.mock.calls[0][0]).toContain('file=F123456');
+  });
+
+  test('downloadFile returns base64 content and enforces byte cap', async () => {
+    mockFetch
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        headers: { get: (name: string) => name === 'content-type' ? 'text/plain; charset=utf-8' : '5' },
+        arrayBuffer: () => Promise.resolve(arrayBufferFromString('hello')),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        headers: { get: (name: string) => name === 'content-length' ? '11' : 'text/plain' },
+        arrayBuffer: () => Promise.resolve(arrayBufferFromString('hello world')),
+      });
+
+    await expect(slackClient.downloadFile('https://files.slack.com/private/file.txt', 'bot', 10)).resolves.toEqual({
+      ok: true,
+      data: Buffer.from('hello').toString('base64'),
+      size: 5,
+      mimeType: 'text/plain',
+    });
+    await expect(slackClient.downloadFile('https://files.slack.com/private/big.txt', 'bot', 10)).resolves.toEqual({
+      ok: false,
+      error: 'file_too_large',
+      size: 11,
+      max_bytes: 10,
+    });
+  });
 });
 
 describe('SlackRouter', () => {
@@ -735,6 +788,253 @@ describe('SlackRouter', () => {
         headers: expect.objectContaining({ Authorization: 'Bearer xoxb-test-token' }),
       }),
     );
+  });
+
+  test('readChannel annotates Slack file messages without downloading by default', async () => {
+    const client = new SlackClient('xoxb-test-token', 'xoxp-user-token');
+    const router = new SlackRouter(client);
+
+    mockFetch.mockResolvedValueOnce({
+      json: () => Promise.resolve({
+        ok: true,
+        messages: [{
+          text: 'See attached',
+          ts: '1234567890.123456',
+          files: [{
+            id: 'F123456',
+            name: 'screenshot.png',
+            title: 'screenshot.png',
+            mimetype: 'image/png',
+            filetype: 'png',
+            size: 1024,
+            url_private: 'https://files.slack.com/private/screenshot.png',
+            url_private_download: 'https://files.slack.com/private/download/screenshot.png',
+          }],
+        }],
+      }),
+    });
+
+    const result = await router.readChannel('C123456', 10);
+
+    expect(result.messages[0]).toEqual(expect.objectContaining({
+      attachment_summary: expect.objectContaining({
+        has_files: true,
+        file_count: 1,
+        agent_note: expect.stringContaining('slack_read_file'),
+        files: [expect.objectContaining({
+          id: 'F123456',
+          is_image: true,
+          is_text_like: false,
+          can_read_with_slack_file_tool: true,
+        })],
+      }),
+    }));
+    expect(result.messages[0].files[0]).not.toHaveProperty('url_private');
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+  });
+
+  test('readChannel annotates attachments and image blocks without file IDs', async () => {
+    const client = new SlackClient('xoxb-test-token', 'xoxp-user-token');
+    const router = new SlackRouter(client);
+
+    mockFetch.mockResolvedValueOnce({
+      json: () => Promise.resolve({
+        ok: true,
+        messages: [{
+          text: 'Attachment preview',
+          ts: '1234567890.123456',
+          attachments: [{ id: 1, fallback: 'preview', image_url: 'https://example.com/image.png' }],
+          blocks: [{ type: 'image', block_id: 'b1', alt_text: 'diagram', image_url: 'https://example.com/diagram.png' }],
+        }],
+      }),
+    });
+
+    const result = await router.readChannel('C123456', 10);
+
+    expect(result.messages[0].attachment_summary).toEqual(expect.objectContaining({
+      has_files: false,
+      has_attachments: true,
+      has_image_blocks: true,
+      agent_note: expect.stringContaining('attachment or image block metadata'),
+    }));
+  });
+
+  test('readChannel can enrich file metadata without downloading file content', async () => {
+    const client = new SlackClient('xoxb-test-token', 'xoxp-user-token');
+    const router = new SlackRouter(client);
+
+    mockFetch
+      .mockResolvedValueOnce({
+        json: () => Promise.resolve({
+          ok: true,
+          messages: [{
+            text: 'See attached',
+            ts: '1234567890.123456',
+            files: [{ id: 'F123456', name: 'notes.txt', mimetype: 'text/plain', size: 20 }],
+          }],
+        }),
+      })
+      .mockResolvedValueOnce({
+        json: () => Promise.resolve({
+          ok: true,
+          file: {
+            id: 'F123456',
+            name: 'notes.txt',
+            title: 'notes.txt',
+            mimetype: 'text/plain',
+            filetype: 'text',
+            size: 20,
+            url_private_download: 'https://files.slack.com/private/notes.txt',
+          },
+        }),
+      });
+
+    const result = await router.readChannel('C123456', 10, undefined, undefined, undefined, { include_files: true });
+
+    expect(result.files).toEqual([
+      expect.objectContaining({
+        file_id: 'F123456',
+        content_status: 'metadata',
+        file: expect.objectContaining({
+          id: 'F123456',
+          is_text_like: true,
+        }),
+      }),
+    ]);
+    expect(result).not.toHaveProperty('mcp_content');
+    expect(mockFetch).toHaveBeenNthCalledWith(
+      2,
+      expect.stringContaining('https://slack.com/api/files.info'),
+      expect.objectContaining({
+        headers: expect.objectContaining({ Authorization: 'Bearer xoxp-user-token' }),
+      }),
+    );
+  });
+
+  test('readFile returns MCP image content for supported images', async () => {
+    const client = new SlackClient('xoxb-test-token', 'xoxp-user-token');
+    const router = new SlackRouter(client);
+
+    mockFetch
+      .mockResolvedValueOnce({
+        json: () => Promise.resolve({
+          ok: true,
+          file: {
+            id: 'FIMG',
+            name: 'image.png',
+            mimetype: 'image/png',
+            filetype: 'png',
+            size: 7,
+            url_private_download: 'https://files.slack.com/private/image.png',
+          },
+        }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        headers: { get: (name: string) => name === 'content-type' ? 'image/png' : '7' },
+        arrayBuffer: () => Promise.resolve(arrayBufferFromString('pngdata')),
+      });
+
+    const result = await router.readFile('FIMG');
+
+    expect(result).toEqual(expect.objectContaining({
+      ok: true,
+      file: expect.objectContaining({ id: 'FIMG', is_image: true }),
+      content_status: 'downloaded',
+      mcp_content: [{
+        type: 'image',
+        data: Buffer.from('pngdata').toString('base64'),
+        mimeType: 'image/png',
+      }],
+      routing: expect.objectContaining({ selected_token_role: 'user' }),
+    }));
+  });
+
+  test('readFile returns embedded text resource for text-like files', async () => {
+    const client = new SlackClient('xoxb-test-token', 'xoxp-user-token');
+    const router = new SlackRouter(client);
+
+    mockFetch
+      .mockResolvedValueOnce({
+        json: () => Promise.resolve({
+          ok: true,
+          file: {
+            id: 'FTXT',
+            name: 'payload.json',
+            mimetype: 'application/json',
+            filetype: 'json',
+            size: 13,
+            url_private_download: 'https://files.slack.com/private/payload.json',
+          },
+        }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        headers: { get: (name: string) => name === 'content-type' ? 'application/json' : '13' },
+        arrayBuffer: () => Promise.resolve(arrayBufferFromString('{"ok":true}')),
+      });
+
+    const result = await router.readFile('FTXT');
+
+    expect(result.mcp_content).toEqual([{
+      type: 'resource',
+      resource: {
+        uri: 'slack://file/FTXT',
+        mimeType: 'application/json',
+        text: '{"ok":true}',
+      },
+    }]);
+  });
+
+  test('readFile returns metadata-only for unsupported file types', async () => {
+    const client = new SlackClient('xoxb-test-token', 'xoxp-user-token');
+    const router = new SlackRouter(client);
+
+    mockFetch.mockResolvedValueOnce({
+      json: () => Promise.resolve({
+        ok: true,
+        file: {
+          id: 'FPDF',
+          name: 'brief.pdf',
+          mimetype: 'application/pdf',
+          filetype: 'pdf',
+          size: 1000,
+          url_private_download: 'https://files.slack.com/private/brief.pdf',
+        },
+      }),
+    });
+
+    const result = await router.readFile('FPDF');
+
+    expect(result).toEqual(expect.objectContaining({
+      ok: true,
+      file: expect.objectContaining({ id: 'FPDF', supported_content_kind: 'metadata_only' }),
+      content_status: 'metadata_only',
+      access_limitation: expect.stringContaining('Only image and text-like Slack files'),
+    }));
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+  });
+
+  test('file metadata falls back from user token to bot token', async () => {
+    const client = new SlackClient('xoxb-test-token', 'xoxp-user-token');
+    const router = new SlackRouter(client);
+
+    mockFetch
+      .mockResolvedValueOnce({ json: () => Promise.resolve({ ok: false, error: 'missing_scope' }) })
+      .mockResolvedValueOnce({ json: () => Promise.resolve({ ok: true, file: { id: 'F123456', name: 'bot-visible.txt', mimetype: 'text/plain' } }) });
+
+    const result = await router.getFileInfo('F123456');
+
+    expect(result).toEqual(expect.objectContaining({
+      ok: true,
+      file: expect.objectContaining({ id: 'F123456' }),
+      routing: expect.objectContaining({
+        selected_token_role: 'bot',
+        fallback_attempts: [{ token_role: 'user', error: 'missing_scope' }],
+      }),
+    }));
   });
 
   test('sendMessage uses user identity for outbound messages', async () => {
@@ -961,6 +1261,8 @@ describe('createSlackServer', () => {
         'slack_list_conversations',
         'slack_get_conversation_info',
         'slack_get_conversation_members',
+        'slack_get_file_info',
+        'slack_read_file',
         'slack_list_channels',
         'slack_post_message',
         'slack_reply_to_thread',
@@ -1064,6 +1366,49 @@ describe('createSlackServer', () => {
     });
 
     expect(mockSlackClient.getChannels).toHaveBeenCalledWith(20, 'next');
+  });
+
+  test('slack_read_file callback returns JSON first and MCP image content second', async () => {
+    const { createSlackServer, SlackClient } = await import('../index.js');
+    const server: any = createSlackServer(new SlackClient('xoxb-test-token', 'xoxp-user-token'));
+
+    (global as any).fetch
+      .mockResolvedValueOnce({
+        json: () => Promise.resolve({
+          ok: true,
+          file: {
+            id: 'FIMG',
+            name: 'image.png',
+            mimetype: 'image/png',
+            filetype: 'png',
+            size: 7,
+            url_private_download: 'https://files.slack.com/private/image.png',
+          },
+        }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        headers: { get: (name: string) => name === 'content-type' ? 'image/png' : '7' },
+        arrayBuffer: () => Promise.resolve(arrayBufferFromString('pngdata')),
+      });
+
+    const readFileHandler = getRegisteredTool(server, 'slack_read_file')[2];
+    const result = await readFileHandler({ file_id: 'FIMG' });
+    const json = JSON.parse(result.content[0].text);
+
+    expect(result.content[0].type).toBe('text');
+    expect(json).toEqual(expect.objectContaining({
+      ok: true,
+      file: expect.objectContaining({ id: 'FIMG' }),
+      content_status: 'downloaded',
+    }));
+    expect(json).not.toHaveProperty('mcp_content');
+    expect(result.content[1]).toEqual({
+      type: 'image',
+      data: Buffer.from('pngdata').toString('base64'),
+      mimeType: 'image/png',
+    });
   });
 });
 

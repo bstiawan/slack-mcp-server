@@ -59,11 +59,215 @@ interface GetUserProfileArgs {
 type TokenRole = "bot" | "user";
 type MessageIntent = "outbound_message" | "notification" | "reminder" | "automation_update";
 
+const DEFAULT_MAX_FILE_BYTES = 10 * 1024 * 1024;
+const DEFAULT_MAX_FILES = 10;
+const FILE_AGENT_NOTE = "This message includes files. Call slack_read_file with file_id to inspect supported content.";
+const ATTACHMENT_AGENT_NOTE = "This message includes Slack attachment or image block metadata. Downloadable Slack file content is only available for file IDs.";
+
 interface RoutingTrace {
   selected_token_role: TokenRole;
   fallback_attempts: Array<{ token_role: TokenRole; error?: string }>;
   routing_reason: string;
   access_limitation?: string;
+}
+
+interface MessageFileOptions {
+  include_files?: boolean;
+  include_file_content?: boolean;
+  max_file_bytes?: number;
+  max_files?: number;
+  token_role?: TokenRole;
+}
+
+function normalizedMimeType(mimetype?: string): string {
+  return String(mimetype || "").split(";")[0].trim().toLowerCase();
+}
+
+function isImageFile(file: any): boolean {
+  const mimetype = normalizedMimeType(file?.mimetype);
+  return mimetype.startsWith("image/") || ["gif", "jpg", "jpeg", "png", "webp", "bmp", "tiff"].includes(String(file?.filetype || "").toLowerCase());
+}
+
+function isTextLikeFile(file: any): boolean {
+  const mimetype = normalizedMimeType(file?.mimetype);
+  return mimetype.startsWith("text/") || [
+    "application/json",
+    "application/xml",
+    "application/yaml",
+    "application/x-yaml",
+    "application/javascript",
+    "application/typescript",
+    "application/csv",
+  ].includes(mimetype);
+}
+
+function supportedFileContentKind(file: any): "image" | "text" | "metadata_only" {
+  if (isImageFile(file)) return "image";
+  if (isTextLikeFile(file)) return "text";
+  return "metadata_only";
+}
+
+function summarizeSlackFile(file: any): any {
+  return {
+    id: file?.id,
+    name: file?.name,
+    title: file?.title,
+    mimetype: file?.mimetype,
+    filetype: file?.filetype,
+    pretty_type: file?.pretty_type,
+    size: file?.size,
+    user: file?.user,
+    mode: file?.mode,
+    is_external: file?.is_external,
+    external_type: file?.external_type,
+    alt_txt: file?.alt_txt,
+    original_w: file?.original_w,
+    original_h: file?.original_h,
+    is_image: isImageFile(file),
+    is_text_like: isTextLikeFile(file),
+    supported_content_kind: supportedFileContentKind(file),
+    can_read_with_slack_file_tool: Boolean(file?.id),
+  };
+}
+
+function summarizeImageBlocks(blocks: any[] = []): any[] {
+  const summaries: any[] = [];
+
+  for (const block of blocks) {
+    if (block?.type === "image") {
+      summaries.push({
+        block_id: block.block_id,
+        alt_text: block.alt_text,
+        title: block.title?.text,
+        has_image_url: Boolean(block.image_url),
+      });
+    }
+
+    if (block?.accessory?.type === "image") {
+      summaries.push({
+        block_id: block.block_id,
+        alt_text: block.accessory.alt_text,
+        title: block.accessory.title?.text,
+        has_image_url: Boolean(block.accessory.image_url),
+      });
+    }
+
+    for (const element of block?.elements || []) {
+      if (element?.type === "image") {
+        summaries.push({
+          block_id: block.block_id,
+          alt_text: element.alt_text,
+          title: element.title?.text,
+          has_image_url: Boolean(element.image_url),
+        });
+      }
+    }
+  }
+
+  return summaries;
+}
+
+function summarizeAttachments(attachments: any[] = []): any[] {
+  return attachments.map((attachment) => ({
+    id: attachment?.id,
+    fallback: attachment?.fallback,
+    title: attachment?.title,
+    text: attachment?.text,
+    mimetype: attachment?.mimetype,
+    filetype: attachment?.filetype,
+    has_image_url: Boolean(attachment?.image_url || attachment?.thumb_url),
+    has_fields: Array.isArray(attachment?.fields) && attachment.fields.length > 0,
+  }));
+}
+
+function buildAttachmentSummary(message: any): any | undefined {
+  const files = Array.isArray(message?.files) ? message.files.map(summarizeSlackFile) : [];
+  const attachments = Array.isArray(message?.attachments) ? summarizeAttachments(message.attachments) : [];
+  const imageBlocks = Array.isArray(message?.blocks) ? summarizeImageBlocks(message.blocks) : [];
+
+  if (!files.length && !attachments.length && !imageBlocks.length) {
+    return undefined;
+  }
+
+  return {
+    has_files: files.length > 0,
+    has_attachments: attachments.length > 0,
+    has_image_blocks: imageBlocks.length > 0,
+    file_count: files.length,
+    attachment_count: attachments.length,
+    image_block_count: imageBlocks.length,
+    files,
+    attachments,
+    image_blocks: imageBlocks,
+    agent_note: files.length > 0 ? FILE_AGENT_NOTE : ATTACHMENT_AGENT_NOTE,
+  };
+}
+
+function annotateMessageForAgent(message: any): any {
+  const attachmentSummary = buildAttachmentSummary(message);
+  if (!attachmentSummary) {
+    return message;
+  }
+
+  const annotated = {
+    ...message,
+    attachment_summary: attachmentSummary,
+  };
+
+  if (Array.isArray(message.files)) {
+    annotated.files = attachmentSummary.files;
+  }
+
+  return annotated;
+}
+
+function annotateMessageResponse(response: any): any {
+  if (!Array.isArray(response?.messages)) {
+    return response;
+  }
+
+  const messages = response.messages.map(annotateMessageForAgent);
+  const attachmentMessages = messages.filter((message: any) => message.attachment_summary);
+
+  if (!attachmentMessages.length) {
+    return {
+      ...response,
+      messages,
+    };
+  }
+
+  return {
+    ...response,
+    messages,
+    attachment_summary: {
+      message_count_with_attachments: attachmentMessages.length,
+      file_count: attachmentMessages.reduce((count: number, message: any) => count + (message.attachment_summary?.file_count || 0), 0),
+      attachment_count: attachmentMessages.reduce((count: number, message: any) => count + (message.attachment_summary?.attachment_count || 0), 0),
+      image_block_count: attachmentMessages.reduce((count: number, message: any) => count + (message.attachment_summary?.image_block_count || 0), 0),
+      agent_note: "Some messages include files or attachment metadata. Call slack_read_file with a file_id to inspect supported Slack-hosted file content.",
+    },
+  };
+}
+
+function normalizeFileOptions(options: MessageFileOptions = {}): Required<Omit<MessageFileOptions, "token_role">> & { token_role?: TokenRole } {
+  const include_file_content = Boolean(options.include_file_content);
+  return {
+    include_files: Boolean(options.include_files || include_file_content),
+    include_file_content,
+    max_file_bytes: Math.max(1, Math.min(options.max_file_bytes ?? DEFAULT_MAX_FILE_BYTES, DEFAULT_MAX_FILE_BYTES)),
+    max_files: Math.max(0, Math.min(options.max_files ?? DEFAULT_MAX_FILES, DEFAULT_MAX_FILES)),
+    token_role: options.token_role,
+  };
+}
+
+function toolResult(response: any): any {
+  const { mcp_content, ...jsonResponse } = response || {};
+  return {
+    content: [
+      { type: "text", text: JSON.stringify(jsonResponse) },
+      ...(Array.isArray(mcp_content) ? mcp_content : []),
+    ],
+  };
 }
 
 export class SlackClient {
@@ -422,6 +626,89 @@ export class SlackClient {
     }, token_role);
   }
 
+  async getFileInfo(file_id: string, token_role: TokenRole = "bot"): Promise<any> {
+    return this.get("files.info", {
+      file: file_id,
+    }, token_role);
+  }
+
+  async downloadFile(url: string, token_role: TokenRole, max_bytes: number = DEFAULT_MAX_FILE_BYTES): Promise<any> {
+    const headers = this.headers(token_role);
+    if (!headers) {
+      return this.missingToken(token_role);
+    }
+
+    const response = await fetch(url, { headers });
+    if (!response.ok) {
+      return {
+        ok: false,
+        error: response.status === 403 ? "not_visible" : response.status === 404 ? "file_not_found" : "file_download_failed",
+        status: response.status,
+      };
+    }
+
+    const contentLength = response.headers?.get?.("content-length");
+    if (contentLength && Number(contentLength) > max_bytes) {
+      return {
+        ok: false,
+        error: "file_too_large",
+        size: Number(contentLength),
+        max_bytes,
+      };
+    }
+
+    const readableBody = response.body as any;
+    if (readableBody?.getReader) {
+      const reader = readableBody.getReader();
+      const chunks: Buffer[] = [];
+      let totalBytes = 0;
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        if (!value) continue;
+
+        const chunk = Buffer.from(value);
+        totalBytes += chunk.byteLength;
+        if (totalBytes > max_bytes) {
+          await reader.cancel?.();
+          return {
+            ok: false,
+            error: "file_too_large",
+            size: totalBytes,
+            max_bytes,
+          };
+        }
+        chunks.push(chunk);
+      }
+
+      const buffer = Buffer.concat(chunks);
+      return {
+        ok: true,
+        data: buffer.toString("base64"),
+        size: buffer.byteLength,
+        mimeType: response.headers?.get?.("content-type")?.split(";")[0],
+      };
+    }
+
+    const arrayBuffer = await response.arrayBuffer();
+    if (arrayBuffer.byteLength > max_bytes) {
+      return {
+        ok: false,
+        error: "file_too_large",
+        size: arrayBuffer.byteLength,
+        max_bytes,
+      };
+    }
+
+    return {
+      ok: true,
+      data: Buffer.from(arrayBuffer).toString("base64"),
+      size: arrayBuffer.byteLength,
+      mimeType: response.headers?.get?.("content-type")?.split(";")[0],
+    };
+  }
+
   async scheduleMessage(
     channel_id: string,
     text: string,
@@ -500,6 +787,11 @@ export class SlackRouter {
       "invalid_auth",
       "account_inactive",
       "not_allowed_token_type",
+      "not_visible",
+      "file_not_found",
+      "no_permission",
+      "access_denied",
+      "team_access_not_granted",
     ].includes(response?.error);
   }
 
@@ -566,6 +858,199 @@ export class SlackRouter {
     });
   }
 
+  private fileRoles(token_role?: TokenRole): TokenRole[] {
+    return token_role ? [token_role] : ["user", "bot"];
+  }
+
+  private sanitizeFileInfoResponse(response: any): any {
+    if (!response?.ok || !response.file) {
+      return response;
+    }
+
+    return {
+      ok: true,
+      file: summarizeSlackFile(response.file),
+      comments: response.comments,
+      response_metadata: response.response_metadata,
+    };
+  }
+
+  async getFileInfo(file_id: string, token_role?: TokenRole): Promise<any> {
+    return this.tryRoles(this.fileRoles(token_role), "Read Slack file metadata with the best available files:read token.", async (role) => {
+      const response = await this.slackClient.getFileInfo(file_id, role);
+      return this.sanitizeFileInfoResponse(response);
+    });
+  }
+
+  private async readFileWithRole(file_id: string, token_role: TokenRole, max_bytes: number): Promise<any> {
+    const info = await this.slackClient.getFileInfo(file_id, token_role);
+    if (!info?.ok || !info.file) {
+      return info;
+    }
+
+    const file = info.file;
+    const sanitizedFile = summarizeSlackFile(file);
+    const contentKind = supportedFileContentKind(file);
+    if (contentKind === "metadata_only") {
+      return {
+        ok: true,
+        file: sanitizedFile,
+        content_status: "metadata_only",
+        access_limitation: "Only image and text-like Slack files are downloaded in this MCP server.",
+      };
+    }
+
+    if (typeof file.size === "number" && file.size > max_bytes) {
+      return {
+        ok: true,
+        file: sanitizedFile,
+        content_status: "skipped",
+        access_limitation: `File size ${file.size} exceeds max_file_bytes ${max_bytes}.`,
+      };
+    }
+
+    const downloadUrl = file.url_private_download || file.url_private;
+    if (!downloadUrl) {
+      return {
+        ok: true,
+        file: sanitizedFile,
+        content_status: "metadata_only",
+        access_limitation: "Slack did not return an authenticated download URL for this file.",
+      };
+    }
+
+    const download = await this.slackClient.downloadFile(downloadUrl, token_role, max_bytes);
+    if (!download?.ok) {
+      return {
+        ...download,
+        file: sanitizedFile,
+      };
+    }
+
+    const mimeType = download.mimeType || sanitizedFile.mimetype || "application/octet-stream";
+    const mcpContent = contentKind === "image"
+      ? [{ type: "image", data: download.data, mimeType }]
+      : [{
+          type: "resource",
+          resource: {
+            uri: `slack://file/${file_id}`,
+            mimeType,
+            text: Buffer.from(download.data, "base64").toString("utf8"),
+          },
+        }];
+
+    return {
+      ok: true,
+      file: sanitizedFile,
+      content_status: "downloaded",
+      downloaded_bytes: download.size,
+      mcp_content: mcpContent,
+    };
+  }
+
+  async readFile(file_id: string, token_role?: TokenRole, max_bytes: number = DEFAULT_MAX_FILE_BYTES): Promise<any> {
+    return this.tryRoles(this.fileRoles(token_role), "Read Slack file content with the best available files:read token.", (role) =>
+      this.readFileWithRole(file_id, role, Math.max(1, Math.min(max_bytes, DEFAULT_MAX_FILE_BYTES))),
+    );
+  }
+
+  private collectFileRefs(messages: any[]): Array<{ file_id: string; message_ts?: string }> {
+    const seen = new Set<string>();
+    const refs: Array<{ file_id: string; message_ts?: string }> = [];
+
+    for (const message of messages) {
+      for (const file of message.attachment_summary?.files || []) {
+        if (file.id && !seen.has(file.id)) {
+          seen.add(file.id);
+          refs.push({ file_id: file.id, message_ts: message.ts });
+        }
+      }
+    }
+
+    return refs;
+  }
+
+  async enrichMessageResponse(response: any, options: MessageFileOptions = {}): Promise<any> {
+    const annotated = annotateMessageResponse(response);
+    const fileOptions = normalizeFileOptions(options);
+    if (!annotated?.ok || !Array.isArray(annotated.messages) || !fileOptions.include_files) {
+      return annotated;
+    }
+
+    const refs = this.collectFileRefs(annotated.messages);
+    const selectedRefs = refs.slice(0, fileOptions.max_files);
+    const mcpContent: any[] = [];
+    const fileResults: any[] = [];
+
+    for (const ref of selectedRefs) {
+      const fileResponse = fileOptions.include_file_content
+        ? await this.readFile(ref.file_id, fileOptions.token_role, fileOptions.max_file_bytes)
+        : await this.getFileInfo(ref.file_id, fileOptions.token_role);
+      const { mcp_content, ...serializableFileResponse } = fileResponse || {};
+
+      if (Array.isArray(mcp_content)) {
+        mcpContent.push(...mcp_content);
+      }
+
+      fileResults.push({
+        file_id: ref.file_id,
+        message_ts: ref.message_ts,
+        ok: Boolean(serializableFileResponse?.ok),
+        file: serializableFileResponse?.file,
+        content_status: serializableFileResponse?.content_status || (serializableFileResponse?.ok ? "metadata" : "error"),
+        error: serializableFileResponse?.error,
+        access_limitation: serializableFileResponse?.access_limitation,
+        routing: serializableFileResponse?.routing,
+      });
+    }
+
+    const filesById = new Map(fileResults.map((fileResult) => [fileResult.file_id, fileResult]));
+    const messages = annotated.messages.map((message: any) => {
+      if (!message.attachment_summary?.files?.length) {
+        return message;
+      }
+
+      const files = message.attachment_summary.files.map((file: any) => ({
+        ...file,
+        enriched_file: filesById.get(file.id)?.file,
+        read_status: filesById.get(file.id)?.content_status,
+      }));
+
+      return {
+        ...message,
+        files,
+        attachment_summary: {
+          ...message.attachment_summary,
+          files,
+        },
+      };
+    });
+
+    const skippedByLimit = refs.slice(fileOptions.max_files).map((ref) => ({
+      file_id: ref.file_id,
+      message_ts: ref.message_ts,
+      content_status: "skipped",
+      access_limitation: `Skipped because max_files is ${fileOptions.max_files}.`,
+    }));
+
+    const enrichedResponse: any = {
+      ...annotated,
+      messages,
+      files: fileResults,
+      downloaded_files: fileResults.filter((fileResult) => fileResult.content_status === "downloaded"),
+      skipped_files: [
+        ...fileResults.filter((fileResult) => fileOptions.include_file_content && fileResult.content_status !== "downloaded"),
+        ...skippedByLimit,
+      ],
+    };
+
+    if (mcpContent.length) {
+      enrichedResponse.mcp_content = mcpContent;
+    }
+
+    return enrichedResponse;
+  }
+
   async readUserProfile(user_id?: string): Promise<any> {
     const roles: TokenRole[] = this.slackClient.hasToken("user") ? ["user", "bot"] : ["bot"];
     return this.tryRoles(roles, "Resolve user profile with the best available identity token.", async (role) => {
@@ -622,16 +1107,19 @@ export class SlackRouter {
     oldest?: string,
     latest?: string,
     cursor?: string,
+    fileOptions?: MessageFileOptions,
   ): Promise<any> {
-    return this.tryRoles(["user", "bot"], "Read channel discussion with the broadest safe read token first.", (role) =>
+    const response = await this.tryRoles(["user", "bot"], "Read channel discussion with the broadest safe read token first.", (role) =>
       this.slackClient.getChannelHistory(channel_id, limit, cursor, oldest, latest, undefined, role),
     );
+    return this.enrichMessageResponse(response, fileOptions);
   }
 
-  async readThread(channel_id: string, thread_ts: string, limit: number = 50, cursor?: string): Promise<any> {
-    return this.tryRoles(["user", "bot"], "Read thread replies with the broadest safe read token first.", (role) =>
+  async readThread(channel_id: string, thread_ts: string, limit: number = 50, cursor?: string, fileOptions?: MessageFileOptions): Promise<any> {
+    const response = await this.tryRoles(["user", "bot"], "Read thread replies with the broadest safe read token first.", (role) =>
       this.slackClient.getThreadRepliesWithRole(channel_id, thread_ts, role, limit, cursor),
     );
+    return this.enrichMessageResponse(response, fileOptions);
   }
 
   async readChannelByName(
@@ -640,6 +1128,7 @@ export class SlackRouter {
     oldest?: string,
     latest?: string,
     cursor?: string,
+    fileOptions?: MessageFileOptions,
   ): Promise<any> {
     const search = await this.searchConversations(channel_name, undefined, 20);
     const conversations = search.channels || search.conversations || [];
@@ -655,7 +1144,7 @@ export class SlackRouter {
       };
     }
 
-    const history = await this.readChannel(selected.id, limit, oldest, latest, cursor);
+    const history = await this.readChannel(selected.id, limit, oldest, latest, cursor, fileOptions);
     return {
       ...history,
       resolved_channel: selected,
@@ -1001,13 +1490,16 @@ export function createSlackServer(slackClient: SlackClient): McpServer {
         latest: z.string().optional().describe("Only messages before this Unix timestamp are included"),
         inclusive: z.boolean().optional().describe("Include messages matching oldest or latest timestamps"),
         token_role: z.enum(["bot", "user"]).optional().describe("Token role to use; defaults to user token when configured, otherwise bot"),
+        include_files: z.boolean().optional().default(false).describe("Fetch Slack file metadata for messages with files"),
+        include_file_content: z.boolean().optional().default(false).describe("Download supported image/text file content and append MCP media/resource content"),
+        max_file_bytes: z.number().optional().default(DEFAULT_MAX_FILE_BYTES).describe("Maximum bytes to download per file, capped at 10 MB"),
+        max_files: z.number().optional().default(DEFAULT_MAX_FILES).describe("Maximum files to inspect, capped at 10"),
       },
     },
-    async ({ channel_id, limit, cursor, oldest, latest, inclusive, token_role }) => {
+    async ({ channel_id, limit, cursor, oldest, latest, inclusive, token_role, include_files, include_file_content, max_file_bytes, max_files }) => {
       const response = await slackClient.getChannelHistory(channel_id, limit, cursor, oldest, latest, inclusive, token_role);
-      return {
-        content: [{ type: "text", text: JSON.stringify(response) }],
-      };
+      const enriched = await slackRouter.enrichMessageResponse(response, { include_files, include_file_content, max_file_bytes, max_files, token_role });
+      return toolResult(enriched);
     }
   );
 
@@ -1088,6 +1580,39 @@ export function createSlackServer(slackClient: SlackClient): McpServer {
   );
 
   server.registerTool(
+    "slack_get_file_info",
+    {
+      title: "Get Slack File Info",
+      description: "Get sanitized Slack file metadata using the best available files:read token",
+      inputSchema: {
+        file_id: z.string().describe("Slack file ID, for example F123456"),
+        token_role: z.enum(["bot", "user"]).optional().describe("Token role to use; defaults to user then bot fallback"),
+      },
+    },
+    async ({ file_id, token_role }) => {
+      const response = await slackRouter.getFileInfo(file_id, token_role);
+      return toolResult(response);
+    }
+  );
+
+  server.registerTool(
+    "slack_read_file",
+    {
+      title: "Read Slack File",
+      description: "Download supported Slack-hosted image or text-like file content and return MCP media/resource content",
+      inputSchema: {
+        file_id: z.string().describe("Slack file ID, for example F123456"),
+        token_role: z.enum(["bot", "user"]).optional().describe("Token role to use; defaults to user then bot fallback"),
+        max_bytes: z.number().optional().default(DEFAULT_MAX_FILE_BYTES).describe("Maximum bytes to download, capped at 10 MB"),
+      },
+    },
+    async ({ file_id, token_role, max_bytes }) => {
+      const response = await slackRouter.readFile(file_id, token_role, max_bytes);
+      return toolResult(response);
+    }
+  );
+
+  server.registerTool(
     "slack_get_thread_replies",
     {
       title: "Get Slack Thread Replies",
@@ -1096,15 +1621,18 @@ export function createSlackServer(slackClient: SlackClient): McpServer {
         channel_id: z.string().describe("The ID of the channel containing the thread"),
         thread_ts: z.string().describe("The timestamp of the parent message in the format '1234567890.123456'. Timestamps in the format without the period can be converted by adding the period such that 6 numbers come after it."),
         token_role: z.enum(["bot", "user"]).optional().describe("Token role to use; defaults to bot for backward compatibility"),
+        include_files: z.boolean().optional().default(false).describe("Fetch Slack file metadata for messages with files"),
+        include_file_content: z.boolean().optional().default(false).describe("Download supported image/text file content and append MCP media/resource content"),
+        max_file_bytes: z.number().optional().default(DEFAULT_MAX_FILE_BYTES).describe("Maximum bytes to download per file, capped at 10 MB"),
+        max_files: z.number().optional().default(DEFAULT_MAX_FILES).describe("Maximum files to inspect, capped at 10"),
       },
     },
-    async ({ channel_id, thread_ts, token_role }) => {
+    async ({ channel_id, thread_ts, token_role, include_files, include_file_content, max_file_bytes, max_files }) => {
       const response = token_role
         ? await slackClient.getThreadRepliesWithRole(channel_id, thread_ts, token_role)
         : await slackClient.getThreadReplies(channel_id, thread_ts);
-      return {
-        content: [{ type: "text", text: JSON.stringify(response) }],
-      };
+      const enriched = await slackRouter.enrichMessageResponse(response, { include_files, include_file_content, max_file_bytes, max_files, token_role });
+      return toolResult(enriched);
     }
   );
 
@@ -1190,13 +1718,15 @@ export function createSlackServer(slackClient: SlackClient): McpServer {
         oldest: z.string().optional().describe("Only messages after this Unix timestamp are included"),
         latest: z.string().optional().describe("Only messages before this Unix timestamp are included"),
         cursor: z.string().optional().describe("Pagination cursor for next page of results"),
+        include_files: z.boolean().optional().default(false).describe("Fetch Slack file metadata for messages with files"),
+        include_file_content: z.boolean().optional().default(false).describe("Download supported image/text file content and append MCP media/resource content"),
+        max_file_bytes: z.number().optional().default(DEFAULT_MAX_FILE_BYTES).describe("Maximum bytes to download per file, capped at 10 MB"),
+        max_files: z.number().optional().default(DEFAULT_MAX_FILES).describe("Maximum files to inspect, capped at 10"),
       },
     },
-    async ({ channel_id, limit, oldest, latest, cursor }) => {
-      const response = await slackRouter.readChannel(channel_id, limit, oldest, latest, cursor);
-      return {
-        content: [{ type: "text", text: JSON.stringify(response) }],
-      };
+    async ({ channel_id, limit, oldest, latest, cursor, include_files, include_file_content, max_file_bytes, max_files }) => {
+      const response = await slackRouter.readChannel(channel_id, limit, oldest, latest, cursor, { include_files, include_file_content, max_file_bytes, max_files });
+      return toolResult(response);
     }
   );
 
@@ -1210,13 +1740,15 @@ export function createSlackServer(slackClient: SlackClient): McpServer {
         thread_ts: z.string().describe("The timestamp of the parent message"),
         limit: z.number().optional().default(50).describe("Number of replies to retrieve"),
         cursor: z.string().optional().describe("Pagination cursor for next page of results"),
+        include_files: z.boolean().optional().default(false).describe("Fetch Slack file metadata for messages with files"),
+        include_file_content: z.boolean().optional().default(false).describe("Download supported image/text file content and append MCP media/resource content"),
+        max_file_bytes: z.number().optional().default(DEFAULT_MAX_FILE_BYTES).describe("Maximum bytes to download per file, capped at 10 MB"),
+        max_files: z.number().optional().default(DEFAULT_MAX_FILES).describe("Maximum files to inspect, capped at 10"),
       },
     },
-    async ({ channel_id, thread_ts, limit, cursor }) => {
-      const response = await slackRouter.readThread(channel_id, thread_ts, limit, cursor);
-      return {
-        content: [{ type: "text", text: JSON.stringify(response) }],
-      };
+    async ({ channel_id, thread_ts, limit, cursor, include_files, include_file_content, max_file_bytes, max_files }) => {
+      const response = await slackRouter.readThread(channel_id, thread_ts, limit, cursor, { include_files, include_file_content, max_file_bytes, max_files });
+      return toolResult(response);
     }
   );
 
@@ -1291,13 +1823,15 @@ export function createSlackServer(slackClient: SlackClient): McpServer {
         oldest: z.string().optional().describe("Only messages after this Unix timestamp are included"),
         latest: z.string().optional().describe("Only messages before this Unix timestamp are included"),
         cursor: z.string().optional().describe("Pagination cursor for next page of results"),
+        include_files: z.boolean().optional().default(false).describe("Fetch Slack file metadata for messages with files"),
+        include_file_content: z.boolean().optional().default(false).describe("Download supported image/text file content and append MCP media/resource content"),
+        max_file_bytes: z.number().optional().default(DEFAULT_MAX_FILE_BYTES).describe("Maximum bytes to download per file, capped at 10 MB"),
+        max_files: z.number().optional().default(DEFAULT_MAX_FILES).describe("Maximum files to inspect, capped at 10"),
       },
     },
-    async ({ channel_name, limit, oldest, latest, cursor }) => {
-      const response = await slackRouter.readChannelByName(channel_name, limit, oldest, latest, cursor);
-      return {
-        content: [{ type: "text", text: JSON.stringify(response) }],
-      };
+    async ({ channel_name, limit, oldest, latest, cursor, include_files, include_file_content, max_file_bytes, max_files }) => {
+      const response = await slackRouter.readChannelByName(channel_name, limit, oldest, latest, cursor, { include_files, include_file_content, max_file_bytes, max_files });
+      return toolResult(response);
     }
   );
 
