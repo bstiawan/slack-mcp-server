@@ -228,7 +228,7 @@ For the bot to access private channels or to post messages, you may need to invi
 
 This repository includes installable Codex skills under `skills/`:
 
-- `skills/slack-mrkdwn` - compose Slack write-tool `text` values in native Slack `mrkdwn`, including links, mentions, emphasis, code, and escaping rules.
+- `skills/slack-mcp` - use this MCP server when Slack may contain useful team context, including reads, searches, threads, linked messages, attachments/files, writes, cleanup, and Slack-native `mrkdwn` formatting.
 
 ## Installation
 

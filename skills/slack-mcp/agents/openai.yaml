@@ -1,0 +1,4 @@
+interface:
+  display_name: "Slack MCP"
+  short_description: "Find Slack context, files, threads, and writes."
+  default_prompt: "Use $slack-mcp when Slack may contain useful team context, then read/search efficiently, inspect threads and attachments when needed, and compose outgoing text in native mrkdwn."
