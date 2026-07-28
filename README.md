@@ -15,14 +15,16 @@ A Model Context Protocol (MCP) server for interacting with Slack workspaces. Thi
    - Returns: List of channels with their IDs and information
 
 2. **slack_post_message**
-   - Post a new message to a Slack channel
+   - Low-level bot-only post to a Slack channel
+   - Prefer `slack_send_message` for identity-aware user-authored sends
    - Required inputs:
      - `channel_id` (string): The ID of the channel to post to
      - `text` (string): The message text to post
    - Returns: Message posting confirmation and timestamp
 
 3. **slack_reply_to_thread**
-   - Reply to a specific message thread
+   - Low-level bot-only reply to a specific message thread
+   - Prefer `slack_send_message` with `thread_ts` for identity-aware user-authored replies
    - Required inputs:
      - `channel_id` (string): The channel containing the thread
      - `thread_ts` (string): Timestamp of the parent message
@@ -152,6 +154,8 @@ These are the preferred tools for agents using the bundled Slack skills. They ch
    - Send messages with `target`, `text`, `thread_ts`, `message_intent`, and `allow_identity_fallback`
    - `outbound_message` prefers user identity
    - `notification`, `reminder`, and `automation_update` prefer bot identity
+   - For Bayu-on-behalf or other human-to-human reminders, use `outbound_message`, not `reminder`
+   - Disable identity fallback when the sender identity matters
 
 24. **slack_edit_message** and **slack_delete_message**
    - Edit or delete messages with identity-aware routing
@@ -159,6 +163,7 @@ These are the preferred tools for agents using the bundled Slack skills. They ch
 
 25. **slack_schedule_message**
    - Schedule messages with the same identity-aware routing as `slack_send_message`
+   - For Bayu-on-behalf or other human-to-human reminders, use `outbound_message`, not `reminder`
 
 26. **slack_send_message_draft** and **slack_create_canvas**
    - Return structured `unsupported_action` responses in this server because Slack Web API draft/canvas creation is not implemented here

@@ -1425,7 +1425,7 @@ export function createSlackServer(slackClient: SlackClient): McpServer {
     "slack_post_message",
     {
       title: "Post Slack Message",
-      description: "Post a new message to a Slack channel or direct message to user",
+      description: "Low-level bot-only post. Do not use for user-authored or Bayu-on-behalf sends; use slack_send_message for identity-aware routing.",
       inputSchema: {
         channel_id: z.string().describe("The ID of the channel or user to post to"),
         text: z.string().describe("The message text to post"),
@@ -1443,7 +1443,7 @@ export function createSlackServer(slackClient: SlackClient): McpServer {
     "slack_reply_to_thread",
     {
       title: "Reply to Slack Thread",
-      description: "Reply to a specific message thread in Slack",
+      description: "Low-level bot-only thread reply. Do not use for user-authored or Bayu-on-behalf replies; use slack_send_message with thread_ts for identity-aware routing.",
       inputSchema: {
         channel_id: z.string().describe("The ID of the channel containing the thread"),
         thread_ts: z.string().describe("The timestamp of the parent message in the format '1234567890.123456'. Timestamps in the format without the period can be converted by adding the period such that 6 numbers come after it."),
@@ -1839,12 +1839,12 @@ export function createSlackServer(slackClient: SlackClient): McpServer {
     "slack_send_message",
     {
       title: "Send Slack Message",
-      description: "Send a Slack message using identity-aware routing",
+      description: "Send a Slack message using identity-aware routing. Use outbound_message for user-authored or Bayu-on-behalf human messages, including reminders to another person or channel.",
       inputSchema: {
         target: z.string().describe("Slack channel, DM, user, or conversation ID to send to"),
         text: z.string().describe("Message text"),
         thread_ts: z.string().optional().describe("Thread timestamp for replies. Omit for normal posts."),
-        message_intent: z.enum(["outbound_message", "notification", "reminder", "automation_update"]).optional().default("outbound_message").describe("Intent used to select user or bot identity"),
+        message_intent: z.enum(["outbound_message", "notification", "reminder", "automation_update"]).optional().default("outbound_message").describe("Intent used to select user or bot identity. outbound_message uses the user identity; notification, reminder, and automation_update use the bot identity. For human-to-human reminders, use outbound_message."),
         allow_identity_fallback: z.boolean().optional().default(false).describe("Allow a user-authored send to fall back to bot identity when user identity cannot send"),
       },
     },
@@ -1865,7 +1865,7 @@ export function createSlackServer(slackClient: SlackClient): McpServer {
         channel_id: z.string().describe("Channel containing the message"),
         ts: z.string().describe("Timestamp of the message to edit"),
         text: z.string().describe("Replacement message text"),
-        message_intent: z.enum(["outbound_message", "notification", "reminder", "automation_update"]).optional().default("outbound_message").describe("Intent used to select user or bot identity"),
+        message_intent: z.enum(["outbound_message", "notification", "reminder", "automation_update"]).optional().default("outbound_message").describe("Intent used to select user or bot identity. outbound_message uses the user identity; notification, reminder, and automation_update use the bot identity. For human-to-human reminders, use outbound_message."),
         allow_identity_fallback: z.boolean().optional().default(false).describe("Allow user identity to fall back to bot identity when user identity cannot edit"),
       },
     },
@@ -1885,7 +1885,7 @@ export function createSlackServer(slackClient: SlackClient): McpServer {
       inputSchema: {
         channel_id: z.string().describe("Channel containing the message"),
         ts: z.string().describe("Timestamp of the message to delete"),
-        message_intent: z.enum(["outbound_message", "notification", "reminder", "automation_update"]).optional().default("outbound_message").describe("Intent used to select user or bot identity"),
+        message_intent: z.enum(["outbound_message", "notification", "reminder", "automation_update"]).optional().default("outbound_message").describe("Intent used to select user or bot identity. outbound_message uses the user identity; notification, reminder, and automation_update use the bot identity. For human-to-human reminders, use outbound_message."),
         allow_identity_fallback: z.boolean().optional().default(false).describe("Allow user identity to fall back to bot identity when user identity cannot delete"),
       },
     },
@@ -1901,13 +1901,13 @@ export function createSlackServer(slackClient: SlackClient): McpServer {
     "slack_schedule_message",
     {
       title: "Schedule Slack Message",
-      description: "Schedule a Slack message using identity-aware routing",
+      description: "Schedule a Slack message using identity-aware routing. Use outbound_message for user-authored or Bayu-on-behalf human messages, including reminders to another person or channel.",
       inputSchema: {
         target: z.string().describe("Slack channel, DM, user, or conversation ID to send to"),
         text: z.string().describe("Message text"),
         post_at: z.number().describe("Unix timestamp for when Slack should post the message"),
         thread_ts: z.string().optional().describe("Thread timestamp for scheduled replies. Omit for normal posts."),
-        message_intent: z.enum(["outbound_message", "notification", "reminder", "automation_update"]).optional().default("outbound_message").describe("Intent used to select user or bot identity"),
+        message_intent: z.enum(["outbound_message", "notification", "reminder", "automation_update"]).optional().default("outbound_message").describe("Intent used to select user or bot identity. outbound_message uses the user identity; notification, reminder, and automation_update use the bot identity. For human-to-human reminders, use outbound_message."),
         allow_identity_fallback: z.boolean().optional().default(false).describe("Allow a user-authored schedule to fall back to bot identity when user identity cannot schedule"),
       },
     },

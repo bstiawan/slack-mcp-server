@@ -69,6 +69,7 @@ Use these preferred tools for goal-oriented work:
 | Existing low-level operations | `slack_post_message`, `slack_reply_to_thread`, `slack_add_reaction`, `slack_list_conversations`, `slack_get_conversation_info`, `slack_get_conversation_members` |
 
 Use `token_role` only when the user asks for explicit bot/user behavior or when debugging access. Otherwise, let the MCP router choose.
+Do not use low-level `slack_post_message` or `slack_reply_to_thread` for user-authored sends; they are bot-only paths. Use `slack_send_message` with `thread_ts` for identity-aware replies.
 
 ## Real-World Playbooks
 
@@ -80,7 +81,7 @@ Use `token_role` only when the user asks for explicit bot/user behavior or when 
 | Need context about a person | Resolve the user/profile, then search messages only when the task requires work context rather than identity. |
 | Need to understand a screenshot/spec/log shared in Slack | Read the message first, check `attachment_summary`, then call `slack_read_file` for only the relevant image or text file. |
 | Need to draft a reply | Read the current thread, identify the ask and latest state, draft concise Slack `mrkdwn`, and do not send unless requested. |
-| Need to send or schedule | Resolve target, read current context if conversation-dependent, use `message_intent`, and avoid silent identity fallback. |
+| Need to send or schedule | Resolve target, read current context if conversation-dependent, use `message_intent`, and avoid silent identity fallback. For human-to-human reminders, use `outbound_message`, not `reminder`. |
 | Need cleanup after testing | Use `slack_edit_message` or `slack_delete_message` only with confirmed `channel_id` and `ts`. |
 
 ## Reading Context Efficiently
@@ -124,6 +125,14 @@ Choose write intent from the user's goal:
 
 - `outbound_message`: a message sent on behalf of the user.
 - `notification`, `reminder`, `automation_update`: bot-safe operational messages.
+
+In Bayu's workspace, choose sender identity from the destination:
+
+- Clo/bot is for messages to Bayu or operational updates meant for Bayu.
+- Bayu/user is for messages to anyone else or to a team channel, including reminders sent on Bayu's behalf.
+- Human-to-human reminders still use `message_intent: "outbound_message"` with `allow_identity_fallback: false`.
+- Do not use `message_intent: "reminder"` for Bayu-on-behalf strategist/staff reminders; this MCP maps that intent to Clo/bot.
+- Do not use bot-only `slack_post_message` or `slack_reply_to_thread` for Bayu-authored or Bayu-on-behalf messages.
 
 For `slack_send_message`, `slack_schedule_message`, `slack_edit_message`, and `slack_delete_message`:
 
